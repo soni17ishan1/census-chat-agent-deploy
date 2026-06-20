@@ -3,3 +3,4 @@ venv/
 __pycache__/
 *.pyc
 .streamlit/secrets.toml
+INTERVIEW_PREP.md
