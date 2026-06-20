@@ -72,10 +72,11 @@ Required environment variables (see `.env.example`):
 pytest tests/ -v
 ```
 
-35 unit tests (mocked Snowflake/Anthropic, no live credentials needed) cover:
+44 unit tests (mocked Snowflake/Anthropic, no live credentials needed) cover:
 - SQL safety validation (rejects non-SELECT statements, multi-statement injection, cross-database references, enforces row limits)
 - Guardrail classification (on/off-topic/inappropriate, malformed-output fail-open behavior, markdown-fence stripping, follow-up context handling)
-- Agent loop control flow (tool dispatch, max-iteration fallback, soft-deadline fallback, progress-callback reporting, exception containment)
+- Agent loop control flow (tool dispatch, max-iteration fallback, soft-deadline fallback, progress-callback reporting, exception containment, conversation-history trimming without breaking tool_use/tool_result pairing)
+- Caching (`tests/test_caching.py`): repeated lookups are served from cache, but a failed query is never cached -- a transient failure must self-heal on retry, not become permanent
 
 Plus 6 **golden-data regression tests** (`tests/test_golden_data.py`) that hit live Snowflake and check the actual aggregation SQL against the official 2020 Decennial Census population for 5 states (10% tolerance, to allow for expected ACS-vs-decennial variance). These exist specifically because the unit tests above can't catch a data-correctness bug like the geography join fan-out described below — one of the golden tests deliberately re-runs the original buggy query and asserts it's wildly wrong, proving the suite would have caught it. Skipped automatically if `SNOWFLAKE_ACCOUNT` isn't set (e.g. in CI without secrets).
 

@@ -7,6 +7,7 @@ caller from the database's point of view.
 import os
 import re
 import threading
+from collections import OrderedDict
 
 import snowflake.connector
 
@@ -74,6 +75,33 @@ def _enforce_row_limit(sql: str) -> str:
 _connection_lock = threading.Lock()
 _connection = None
 
+# Repeated/identical questions (same or different users) shouldn't re-run
+# the exact same query against Snowflake -- this is read-only, immutable
+# historical data, so caching successful results is always safe. We
+# deliberately only cache *successes*: caching an error would make a
+# transient failure (e.g. the warehouse-cold-start issue observed during
+# testing) permanent for the rest of the process's life, which is worse
+# than no caching at all.
+_QUERY_CACHE_MAX_ENTRIES = 256
+_query_cache: "OrderedDict[str, dict]" = OrderedDict()
+_query_cache_lock = threading.Lock()
+
+
+def _cache_get(key: str):
+    with _query_cache_lock:
+        if key in _query_cache:
+            _query_cache.move_to_end(key)
+            return _query_cache[key]
+    return None
+
+
+def _cache_put(key: str, value: dict) -> None:
+    with _query_cache_lock:
+        _query_cache[key] = value
+        _query_cache.move_to_end(key)
+        while len(_query_cache) > _QUERY_CACHE_MAX_ENTRIES:
+            _query_cache.popitem(last=False)
+
 
 def get_connection():
     global _connection
@@ -99,6 +127,11 @@ def run_select(sql: str) -> dict:
         return {"error": f"Query rejected by safety check: {e}"}
 
     safe_sql = _enforce_row_limit(sql)
+
+    cached = _cache_get(safe_sql)
+    if cached is not None:
+        return cached
+
     conn = get_connection()
     cur = conn.cursor()
     try:
@@ -106,7 +139,9 @@ def run_select(sql: str) -> dict:
         cur.execute(safe_sql)
         columns = [d[0] for d in cur.description]
         rows = cur.fetchall()
-        return {"columns": columns, "rows": rows, "row_count": len(rows)}
+        result = {"columns": columns, "rows": rows, "row_count": len(rows)}
+        _cache_put(safe_sql, result)
+        return result
     except snowflake.connector.errors.ProgrammingError as e:
         return {"error": f"Snowflake query error: {e.msg if hasattr(e, 'msg') else e}"}
     finally:

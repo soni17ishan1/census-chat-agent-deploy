@@ -4,6 +4,8 @@ Column codes (e.g. B01001e1) are consistent across the 2019 and 2020 ACS
 table variants in this dataset, so we look them up against the 2020
 metadata tables regardless of which year's data table is ultimately queried.
 """
+from functools import lru_cache
+
 from agent.snowflake_client import DATABASE, SCHEMA, get_connection
 
 METADATA_YEAR = "2020"
@@ -11,6 +13,12 @@ METADATA_YEAR = "2020"
 AVAILABLE_YEARS = ("2019", "2020")
 
 
+# This metadata is static for the lifetime of the process (it's a fixed,
+# already-published dataset), and these lookups repeat constantly across
+# questions/users (e.g. almost every income question searches "income").
+# lru_cache only memoizes successful returns -- if get_connection() or the
+# query raises, nothing is cached and the next call retries fresh.
+@lru_cache(maxsize=128)
 def search_census_tables(keyword: str, limit: int = 20) -> list[dict]:
     """Find ACS table codes whose title/topic/universe mentions `keyword`."""
     conn = get_connection()
@@ -32,6 +40,7 @@ def search_census_tables(keyword: str, limit: int = 20) -> list[dict]:
         cur.close()
 
 
+@lru_cache(maxsize=128)
 def get_table_fields(table_number: str) -> list[dict]:
     """Return every column code + human-readable description for a table number."""
     conn = get_connection()
