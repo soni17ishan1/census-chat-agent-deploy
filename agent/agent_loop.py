@@ -5,6 +5,7 @@ numbers that didn't come back from Snowflake.
 """
 import json
 import time
+from typing import Callable, Optional
 
 import anthropic
 
@@ -84,6 +85,16 @@ class AgentTimeoutError(RuntimeError):
     pass
 
 
+def _progress_message(name: str, tool_input: dict) -> str:
+    if name == "search_census_tables":
+        return f"Searching Census tables for \"{tool_input.get('keyword', '')}\"..."
+    if name == "get_table_fields":
+        return f"Looking up columns in table {tool_input.get('table_number', '')}..."
+    if name == "run_sql":
+        return "Querying Snowflake..."
+    return f"Running {name}..."
+
+
 def _execute_tool(name: str, tool_input: dict) -> dict:
     try:
         if name == "search_census_tables":
@@ -97,9 +108,17 @@ def _execute_tool(name: str, tool_input: dict) -> dict:
         return {"error": f"{type(e).__name__}: {e}"}
 
 
-def run_agent_turn(messages: list[dict]) -> str:
+def run_agent_turn(
+    messages: list[dict], on_progress: Optional[Callable[[str], None]] = None
+) -> str:
     """Runs one user turn to completion, mutating `messages` in place with
-    the full tool-use trace so the next turn has full context."""
+    the full tool-use trace so the next turn has full context.
+
+    on_progress, if given, is called with a short human-readable status
+    string before each tool call -- lets the UI show real step-by-step
+    progress instead of one static "please wait" message for the whole
+    (up to 45s) loop.
+    """
     client = anthropic.Anthropic()
     deadline = time.monotonic() + SOFT_DEADLINE_SECONDS
 
@@ -132,6 +151,8 @@ def run_agent_turn(messages: list[dict]) -> str:
         tool_result_blocks = []
         for block in response.content:
             if block.type == "tool_use":
+                if on_progress:
+                    on_progress(_progress_message(block.name, block.input))
                 result = _execute_tool(block.name, block.input)
                 tool_result_blocks.append(
                     {

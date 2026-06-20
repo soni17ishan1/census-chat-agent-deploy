@@ -78,7 +78,10 @@ if user_input:
                 st.session_state.anthropic_messages.append(
                     {"role": "user", "content": user_input}
                 )
-                answer = run_agent_turn(st.session_state.anthropic_messages)
+                answer = run_agent_turn(
+                    st.session_state.anthropic_messages,
+                    on_progress=lambda msg: placeholder.markdown(f"_{msg}_"),
+                )
             except Exception as e:
                 answer = (
                     "I'm having trouble connecting to the Census data right now "

@@ -109,3 +109,25 @@ def test_execute_tool_catches_exceptions_instead_of_crashing():
 def test_execute_tool_unknown_tool_name():
     result = agent_loop._execute_tool("not_a_real_tool", {})
     assert "error" in result
+
+
+@patch("agent.agent_loop._execute_tool")
+@patch("agent.agent_loop.anthropic.Anthropic")
+def test_run_agent_turn_reports_progress_per_tool_call(mock_anthropic_cls, mock_execute_tool):
+    mock_execute_tool.return_value = {"results": []}
+    mock_client = MagicMock()
+    mock_client.messages.create.side_effect = [
+        _response(
+            [_tool_use_block("search_census_tables", {"keyword": "income"})],
+            stop_reason="tool_use",
+        ),
+        _response([_text_block("done")], stop_reason="end_turn"),
+    ]
+    mock_anthropic_cls.return_value = mock_client
+
+    progress_messages = []
+    messages = [{"role": "user", "content": "What is median income?"}]
+    agent_loop.run_agent_turn(messages, on_progress=progress_messages.append)
+
+    assert len(progress_messages) == 1
+    assert "income" in progress_messages[0]
