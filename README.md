@@ -1,5 +1,7 @@
 # US Census Chat Agent
 
+[![Tests](https://github.com/soni17ishan1/census-chat-agent/actions/workflows/test.yml/badge.svg)](https://github.com/soni17ishan1/census-chat-agent/actions/workflows/test.yml)
+
 A chat agent that answers natural-language questions about US population/demographics, grounded in the SafeGraph **"US Open Census Data – Neighborhood Insights"** dataset from the Snowflake Marketplace (ACS 5-year estimates, Census Block Group level, survey years 2019 and 2020).
 
 **Live demo:** https://census-chat-agent-deploy-6zfehfufdvmbj89ztcv7nw.streamlit.app/
@@ -101,6 +103,8 @@ pytest tests/ -v
 - Connection resilience (`tests/test_connection_resilience.py`): a SQL-level error fails immediately (no point retrying a wrong query), a connection-level error gets exactly one retry against a fresh connection before giving up
 
 Plus 6 **golden-data regression tests** (`tests/test_golden_data.py`) that hit live Snowflake and check the actual aggregation SQL against the official 2020 Decennial Census population for 5 states (10% tolerance, to allow for expected ACS-vs-decennial variance). These exist specifically because the unit tests above can't catch a data-correctness bug like the geography join fan-out described below — one of the golden tests deliberately re-runs the original buggy query and asserts it's wildly wrong, proving the suite would have caught it. Skipped automatically if `SNOWFLAKE_ACCOUNT` isn't set (e.g. in CI without secrets).
+
+**CI:** `.github/workflows/test.yml` runs the 47 mocked tests on every push (no Snowflake credentials are configured as GitHub secrets, so the 6 golden tests show as skipped in CI, not failed -- they're a deliberate manual/local verification step, not wired into the automated pipeline, to avoid spending the Snowflake cost-cap credits on every push).
 
 ## Interpretation of open-ended requirements
 
