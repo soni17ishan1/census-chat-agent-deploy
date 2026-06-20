@@ -9,9 +9,10 @@ import os
 import re
 import threading
 import time
-from collections import OrderedDict
 
 import snowflake.connector
+
+from agent.cache_utils import BoundedCache
 
 logger = logging.getLogger(__name__)
 
@@ -85,26 +86,9 @@ _connection = None
 # deliberately only cache *successes*: caching an error would make a
 # transient failure (e.g. the warehouse-cold-start issue observed during
 # testing) permanent for the rest of the process's life, which is worse
-# than no caching at all.
-_QUERY_CACHE_MAX_ENTRIES = 256
-_query_cache: "OrderedDict[str, dict]" = OrderedDict()
-_query_cache_lock = threading.Lock()
-
-
-def _cache_get(key: str):
-    with _query_cache_lock:
-        if key in _query_cache:
-            _query_cache.move_to_end(key)
-            return _query_cache[key]
-    return None
-
-
-def _cache_put(key: str, value: dict) -> None:
-    with _query_cache_lock:
-        _query_cache[key] = value
-        _query_cache.move_to_end(key)
-        while len(_query_cache) > _QUERY_CACHE_MAX_ENTRIES:
-            _query_cache.popitem(last=False)
+# than no caching at all. Bounded (see agent/cache_utils.py) so this can't
+# grow without limit over a long-running process.
+_query_cache: BoundedCache[str, dict] = BoundedCache()
 
 
 def get_connection():
@@ -163,7 +147,7 @@ def run_select(sql: str) -> dict:
 
     safe_sql = _enforce_row_limit(sql)
 
-    cached = _cache_get(safe_sql)
+    cached = _query_cache.get(safe_sql)
     if cached is not None:
         logger.info("Cache hit | sql=%s", safe_sql[:200])
         return cached
@@ -219,5 +203,5 @@ def run_select(sql: str) -> dict:
     logger.info(
         "Query succeeded in %.1fs, %d rows | sql=%s", elapsed, result["row_count"], safe_sql[:200]
     )
-    _cache_put(safe_sql, result)
+    _query_cache.put(safe_sql, result)
     return result

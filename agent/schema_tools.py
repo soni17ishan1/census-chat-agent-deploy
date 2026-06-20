@@ -6,6 +6,7 @@ metadata tables regardless of which year's data table is ultimately queried.
 """
 import logging
 
+from agent.cache_utils import BoundedCache
 from agent.snowflake_client import DATABASE, SCHEMA, get_connection
 
 logger = logging.getLogger(__name__)
@@ -17,20 +18,22 @@ AVAILABLE_YEARS = ("2019", "2020")
 # This metadata is static for the lifetime of the process (it's a fixed,
 # already-published dataset), and these lookups repeat constantly across
 # questions/users (e.g. almost every income question searches "income").
-# Plain dict caches (not lru_cache) so we can log explicitly whether a given
-# call was a cache hit or a fresh Snowflake round-trip -- important for
-# debugging "why was this answer instant vs. slow". A raised exception is
-# never cached, so a transient failure always retries fresh next time.
-_table_search_cache: dict[tuple[str, int], list[dict]] = {}
-_table_fields_cache: dict[str, list[dict]] = {}
+# Bounded (see agent/cache_utils.py) so this can't grow without limit over a
+# long-running process, and we check/log explicitly (rather than using
+# functools.lru_cache) so a hit vs. a miss is visible in the logs -- useful
+# for debugging "why was this answer instant vs. slow". A raised exception
+# is never cached, so a transient failure always retries fresh next time.
+_table_search_cache: BoundedCache[tuple, list] = BoundedCache()
+_table_fields_cache: BoundedCache[str, list] = BoundedCache()
 
 
 def search_census_tables(keyword: str, limit: int = 20) -> list[dict]:
     """Find ACS table codes whose title/topic/universe mentions `keyword`."""
     cache_key = (keyword, limit)
-    if cache_key in _table_search_cache:
+    cached = _table_search_cache.get(cache_key)
+    if cached is not None:
         logger.info("Cache hit: search_census_tables(%r)", keyword)
-        return _table_search_cache[cache_key]
+        return cached
 
     logger.info("Cache miss: search_census_tables(%r), querying Snowflake", keyword)
     conn = get_connection()
@@ -50,15 +53,16 @@ def search_census_tables(keyword: str, limit: int = 20) -> list[dict]:
         result = [dict(zip(cols, row)) for row in cur.fetchall()]
     finally:
         cur.close()
-    _table_search_cache[cache_key] = result
+    _table_search_cache.put(cache_key, result)
     return result
 
 
 def get_table_fields(table_number: str) -> list[dict]:
     """Return every column code + human-readable description for a table number."""
-    if table_number in _table_fields_cache:
+    cached = _table_fields_cache.get(table_number)
+    if cached is not None:
         logger.info("Cache hit: get_table_fields(%r)", table_number)
-        return _table_fields_cache[table_number]
+        return cached
 
     logger.info("Cache miss: get_table_fields(%r), querying Snowflake", table_number)
     conn = get_connection()
@@ -81,7 +85,7 @@ def get_table_fields(table_number: str) -> list[dict]:
             r["description"] = " > ".join(parts)
     finally:
         cur.close()
-    _table_fields_cache[table_number] = rows
+    _table_fields_cache.put(table_number, rows)
     return rows
 
 

@@ -26,17 +26,17 @@ Agent loop (agent/agent_loop.py)
    │  Claude (tool use), up to 8 tool-call iterations, 45s soft deadline
    │  conversation history trimmed to last 8 turns before each call
    │
-   ├─► search_census_tables(keyword)   ─┐
-   ├─► get_table_fields(table_number)   ├─► agent/schema_tools.py
-   └─► run_sql(sql)                    ─┘     (schema introspection,
-                                         │      in-memory cache, logged
-                                         │      hit/miss on every call)
+   ├─► search_census_tables(keyword)   ─┐  cache #1 (BoundedCache,
+   ├─► get_table_fields(table_number)   ├─ 256 entries, FIFO)   agent/schema_tools.py
+   └─► run_sql(sql)                    ─┘  cache #2 (same)      (schema introspection,
+                                         │                        logged hit/miss every call)
                                          ▼
                               agent/snowflake_client.py
                               (SELECT-only validation, cross-database
                                block, row cap, statement timeout,
-                               cached results, retry-with-reconnect
-                               on connection-level failures)
+                               cache #3 -- BoundedCache, 256 entries,
+                               FIFO -- retry-with-reconnect on
+                               connection-level failures)
                                          │
                                          ▼
                                     Snowflake
@@ -80,7 +80,7 @@ Current behavior, for a quick reference. The reasoning, evidence, and tradeoffs 
 | **Per-session rate limit** (`app.py`) | 30 questions/session, 3s minimum between messages |
 | **Snowflake Resource Monitor** (`CENSUS_CHAT_AGENT_BUDGET`) | 10 credit/month quota, auto-suspends the warehouse at 100% usage, enforced by Snowflake itself (not app code) |
 | **Input length cap** (`app.py`) | Rejects messages over 500 characters before they reach the guardrail/agent |
-| **Caching** (`schema_tools.py`, `snowflake_client.py`) | Repeated schema lookups/SQL are served from an in-memory cache; errors are never cached |
+| **Caching** (`agent/cache_utils.py:BoundedCache`) | Three separate caches -- `search_census_tables`, `get_table_fields`, and SQL results -- each bounded at 256 entries with FIFO eviction, so none can grow without limit over a long-running process. Errors are never cached |
 | **Connection retry** (`snowflake_client.py`) | A SQL-level error fails immediately; a connection-level error forces a fresh connection and retries once |
 | **History trimming** (`agent_loop.trim_history`) | Keeps only the last 8 user turns' worth of context sent to Claude, dropping older turns at safe boundaries |
 | **Structured logging** (stdout, captured by Streamlit Cloud's log viewer) | Every question, guardrail verdict, tool call with cache hit/miss, generated SQL with latency/outcome, and exception traceback |
@@ -113,6 +113,7 @@ Mocked unit tests (Snowflake/Anthropic mocked, no live credentials needed) cover
 - Guardrail classification (on/off-topic/inappropriate, malformed-output fail-open behavior, markdown-fence stripping, follow-up context handling)
 - Agent loop control flow (tool dispatch, max-iteration fallback, soft-deadline fallback, progress-callback reporting, exception containment, conversation-history trimming without breaking tool_use/tool_result pairing)
 - Caching (`tests/test_caching.py`): repeated lookups are served from cache, but a failed query is never cached -- a transient failure must self-heal on retry, not become permanent
+- Cache bounding (`tests/test_cache_utils.py`): the shared `BoundedCache` never exceeds its size limit (verified by inserting 100 entries into a 5-entry cache), evicts the oldest entry first, and `get()` refreshes an entry's recency so it survives eviction
 - Connection resilience (`tests/test_connection_resilience.py`): a SQL-level error fails immediately (no point retrying a wrong query), a connection-level error gets exactly one retry against a fresh connection before giving up
 
 Plus **golden-data regression tests** (`tests/test_golden_data.py`) that hit live Snowflake and check the actual aggregation SQL against the official 2020 Decennial Census population for several states (10% tolerance, to allow for expected ACS-vs-decennial variance). These exist specifically because the mocked tests above can't catch a data-correctness bug like the geography join fan-out described above (in Data notes) — one of them deliberately re-runs the original buggy query and asserts it's wildly wrong, proving the suite would have caught it. Skipped automatically (not failed) if `SNOWFLAKE_ACCOUNT` isn't set.
