@@ -5,6 +5,8 @@ A chat agent that answers natural-language questions about US population/demogra
 **Live demo:** _<filled in after deployment>_
 **Password:** _<filled in after deployment>_
 
+> **Note on repos:** this private repo (`census-chat-agent`) is the canonical deliverable. Streamlit Community Cloud's free tier requires a *public* source repo, so a code-only mirror with no secrets, `census-chat-agent-deploy` (https://github.com/soni17ishan1/census-chat-agent-deploy), is used solely as the deploy source.
+
 ## Architecture
 
 ```
