@@ -1,3 +1,4 @@
+import logging
 import os
 import time
 
@@ -5,6 +6,16 @@ import streamlit as st
 from dotenv import load_dotenv
 
 load_dotenv()
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+)
+# The Snowflake connector logs verbosely at INFO (connection handshake
+# details on every query) -- quiet it down so our own application logs
+# (questions, generated SQL, latency, guardrail verdicts) aren't buried.
+logging.getLogger("snowflake.connector").setLevel(logging.WARNING)
+logger = logging.getLogger(__name__)
 
 from agent import guardrails
 from agent.agent_loop import run_agent_turn, trim_history
@@ -19,6 +30,9 @@ st.set_page_config(page_title="US Census Chat Agent", page_icon="📊")
 # the account-wide hard stop.
 MAX_MESSAGES_PER_SESSION = 30
 MIN_SECONDS_BETWEEN_MESSAGES = 3
+# A single huge pasted-in message would burn a disproportionate number of
+# tokens (cost) in one shot; real census questions are short.
+MAX_INPUT_LENGTH = 500
 
 
 def _get_secret(key: str) -> str | None:
@@ -77,12 +91,26 @@ if st.session_state.message_count >= MAX_MESSAGES_PER_SESSION:
 user_input = st.chat_input("Ask a question about US Census data...")
 
 if user_input:
+    if len(user_input) > MAX_INPUT_LENGTH:
+        logger.warning("Rejected over-length input: %d chars", len(user_input))
+        st.warning(
+            f"That question is too long ({len(user_input)} characters, max "
+            f"{MAX_INPUT_LENGTH}). Please shorten it."
+        )
+        st.stop()
+
     now = time.monotonic()
     if now - st.session_state.last_message_time < MIN_SECONDS_BETWEEN_MESSAGES:
         st.warning("Please wait a few seconds between questions.")
         st.stop()
     st.session_state.last_message_time = now
     st.session_state.message_count += 1
+
+    logger.info(
+        "Question received (session msg #%d): %s",
+        st.session_state.message_count,
+        user_input[:300],
+    )
 
     st.session_state.display_messages.append({"role": "user", "content": user_input})
     with st.chat_message("user"):
@@ -95,7 +123,10 @@ if user_input:
         try:
             verdict = guardrails.classify(user_input, st.session_state.display_messages[:-1])
         except Exception:
+            logger.exception("Guardrail classification failed, failing open")
             verdict = {"verdict": "on_topic", "reason": "guardrail call failed, failing open"}
+
+        logger.info("Guardrail verdict=%s reason=%s", verdict["verdict"], verdict.get("reason"))
 
         if verdict["verdict"] in guardrails.REFUSAL_MESSAGES:
             answer = guardrails.REFUSAL_MESSAGES[verdict["verdict"]]
@@ -120,7 +151,9 @@ if user_input:
                     st.session_state.anthropic_messages,
                     on_progress=lambda msg: placeholder.markdown(f"_{msg}_"),
                 )
+                logger.info("Answered successfully in %.1fs", time.monotonic() - start)
             except Exception as e:
+                logger.exception("Agent turn failed after %.1fs", time.monotonic() - start)
                 answer = (
                     "I'm having trouble connecting to the Census data right now "
                     f"({type(e).__name__}). Please try again in a moment, and let "
@@ -128,6 +161,7 @@ if user_input:
                 )
             elapsed = time.monotonic() - start
             if elapsed > 55:
+                logger.warning("Response exceeded 55s: %.1fs", elapsed)
                 answer += "\n\n_(That took longer than expected -- try a narrower question.)_"
             placeholder.markdown(answer)
 

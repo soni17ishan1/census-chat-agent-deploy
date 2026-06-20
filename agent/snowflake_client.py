@@ -4,12 +4,16 @@ The marketplace database is shared as read-only by Snowflake itself, but we
 still validate SQL text here as defense in depth: the LLM is an untrusted
 caller from the database's point of view.
 """
+import logging
 import os
 import re
 import threading
+import time
 from collections import OrderedDict
 
 import snowflake.connector
+
+logger = logging.getLogger(__name__)
 
 DATABASE = "US_OPEN_CENSUS_DATA__NEIGHBORHOOD_INSIGHTS__FREE_DATASET"
 SCHEMA = "PUBLIC"
@@ -119,30 +123,101 @@ def get_connection():
         return _connection
 
 
+def _force_reconnect() -> None:
+    """Discard the current connection so the next get_connection() call
+    creates a fresh one. Used when a query fails for a reason that looks
+    connection-related (not a SQL-level error) -- e.g. the Snowflake
+    warehouse-cold-start failure observed live during testing, where the
+    connection/session was stale rather than the query being wrong."""
+    global _connection
+    with _connection_lock:
+        if _connection is not None:
+            try:
+                _connection.close()
+            except Exception:
+                pass
+        _connection = None
+
+
+def _execute_query(sql: str) -> dict:
+    """Runs `sql` once against the current connection. Raises on failure."""
+    conn = get_connection()
+    cur = conn.cursor()
+    try:
+        cur.execute(f"ALTER SESSION SET STATEMENT_TIMEOUT_IN_SECONDS = {QUERY_TIMEOUT_SECONDS}")
+        cur.execute(sql)
+        columns = [d[0] for d in cur.description]
+        rows = cur.fetchall()
+        return {"columns": columns, "rows": rows, "row_count": len(rows)}
+    finally:
+        cur.close()
+
+
 def run_select(sql: str) -> dict:
     """Validate and execute a read-only query. Returns dict with columns/rows or error."""
     try:
         validate_select_only(sql)
     except SqlSafetyError as e:
+        logger.warning("SQL rejected by safety check: %s | sql=%s", e, sql[:200])
         return {"error": f"Query rejected by safety check: {e}"}
 
     safe_sql = _enforce_row_limit(sql)
 
     cached = _cache_get(safe_sql)
     if cached is not None:
+        logger.info("Cache hit | sql=%s", safe_sql[:200])
         return cached
 
-    conn = get_connection()
-    cur = conn.cursor()
+    start = time.monotonic()
     try:
-        cur.execute(f"ALTER SESSION SET STATEMENT_TIMEOUT_IN_SECONDS = {QUERY_TIMEOUT_SECONDS}")
-        cur.execute(safe_sql)
-        columns = [d[0] for d in cur.description]
-        rows = cur.fetchall()
-        result = {"columns": columns, "rows": rows, "row_count": len(rows)}
-        _cache_put(safe_sql, result)
-        return result
+        result = _execute_query(safe_sql)
     except snowflake.connector.errors.ProgrammingError as e:
+        # A SQL-level problem (bad column, bad syntax) -- retrying the exact
+        # same query against a fresh connection would just fail the same
+        # way, so don't waste time/budget on it.
+        elapsed = time.monotonic() - start
+        logger.error(
+            "SQL error after %.1fs: %s | sql=%s", elapsed, e, safe_sql[:200]
+        )
         return {"error": f"Snowflake query error: {e.msg if hasattr(e, 'msg') else e}"}
-    finally:
-        cur.close()
+    except Exception as e:
+        # Anything else (connection drop, warehouse-cold-start timeout,
+        # network blip) looks like a connection/session problem rather than
+        # a SQL problem -- worth one retry against a forced-fresh connection
+        # before giving up, since these are exactly the transient failures
+        # we've seen self-resolve on a simple retry.
+        logger.warning(
+            "Non-SQL error (%s), forcing reconnect and retrying once | sql=%s",
+            type(e).__name__,
+            safe_sql[:200],
+        )
+        _force_reconnect()
+        try:
+            result = _execute_query(safe_sql)
+        except snowflake.connector.errors.ProgrammingError as e2:
+            elapsed = time.monotonic() - start
+            logger.error(
+                "SQL error on retry after %.1fs: %s | sql=%s", elapsed, e2, safe_sql[:200]
+            )
+            return {"error": f"Snowflake query error: {e2.msg if hasattr(e2, 'msg') else e2}"}
+        except Exception as e2:
+            elapsed = time.monotonic() - start
+            logger.error(
+                "Retry also failed after %.1fs: %s: %s | sql=%s",
+                elapsed,
+                type(e2).__name__,
+                e2,
+                safe_sql[:200],
+            )
+            return {
+                "error": (
+                    f"Snowflake connection error after retry: {type(e2).__name__}: {e2}"
+                )
+            }
+
+    elapsed = time.monotonic() - start
+    logger.info(
+        "Query succeeded in %.1fs, %d rows | sql=%s", elapsed, result["row_count"], safe_sql[:200]
+    )
+    _cache_put(safe_sql, result)
+    return result
