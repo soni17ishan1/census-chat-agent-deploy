@@ -51,24 +51,24 @@ Agent loop (agent/agent_loop.py)
 ## Data notes (load-bearing, not just trivia)
 
 - **Granularity:** Census Block Group (12-digit FIPS code). There is no city/place-level table — the agent is instructed to say so plainly rather than approximate when asked about a city.
-- **Geography join gotcha:** `METADATA_CBG_FIPS_CODES` has one row *per county*, and its `COUNTY_FIPS` column is only the 3-digit county part, not a 5-digit code. Joining a data table to it on `STATE_FIPS` alone fan-outs every block-group row against every county in that state — we hit this directly during development and it inflated California's summed population by ~58x. The fix (join on `STATE_FIPS` **and** `COUNTY_FIPS` together) is baked into the agent's system prompt (`agent/schema_tools.py:SCHEMA_PRIMER`) so the model doesn't repeat the mistake.
-- **`STATE` column gotcha:** it holds the 2-letter USPS abbreviation (`'CA'`), not the full name (`'California'`). Filtering on the full name doesn't error -- it just matches zero rows, so a `SUM` silently returns `NULL` instead of failing loudly. Caught via the structured logging described below (the model's first attempt at a new state would occasionally guess the full name, then burn 2-3 extra tool calls self-correcting); fixed by stating the column's actual format explicitly in the system prompt.
+- **Geography join:** `METADATA_CBG_FIPS_CODES` has one row *per county*; its `COUNTY_FIPS` column is only the 3-digit county part, not a 5-digit code. A data table must join to it on `STATE_FIPS` **and** `COUNTY_FIPS` together, never `STATE_FIPS` alone (see `agent/schema_tools.py:SCHEMA_PRIMER` for the exact join, baked into the agent's system prompt so the model doesn't get this wrong — the story behind why this matters is in `REFLECTION.md`).
+- **`STATE` column format:** holds the 2-letter USPS abbreviation (`'CA'`), not the full name (`'California'`); filtering on the full name doesn't error, it just silently matches zero rows.
 - **Column identifiers are mixed-case** (e.g. `B01001e1`) and must be double-quoted in SQL or Snowflake folds them to uppercase and the query fails.
 - Scope is limited to the ACS demographic tables (`{year}_CBG_{table_group}`) and their metadata. Geometry, foot-traffic "patterns", and 2020 redistricting tables are present in the database but out of scope for this agent (see REFLECTION.md).
 
 ## Operational safeguards
 
-Added after the initial build, each in response to a real gap or a real incident observed live (not hypothetical) -- see `REFLECTION.md` for the full story behind each one.
+Current behavior, for a quick reference. The reasoning, evidence, and tradeoffs behind each one are in `REFLECTION.md`, not duplicated here.
 
-| Safeguard | What it does | Why |
-|---|---|---|
-| **Per-session rate limit** (`app.py`) | 30 questions/session, 3s minimum between messages | A leaked password had no limit on how much it could cost |
-| **Snowflake Resource Monitor** (`CENSUS_CHAT_AGENT_BUDGET`, 10 credit/month) | Hard-suspends the warehouse at 100% usage, enforced by Snowflake itself | An account-wide spend cap that can't be bypassed by an app bug |
-| **Input length cap** (`app.py`, 500 chars) | Rejects oversized messages before they reach the guardrail/agent | One huge pasted message could burn a lot of tokens in a single request |
-| **Caching** (`schema_tools.py`, `snowflake_client.py`) | Repeated schema lookups/SQL are served from an in-memory cache; errors are never cached | This is static, read-only historical data -- safe to cache; caching a transient failure would make it permanent until restart |
-| **Connection retry** (`snowflake_client.py`) | A SQL-level error fails immediately; anything else (connection drop) forces a fresh connection and retries once | We observed exactly this failure mode live (a query failed, the same one succeeded moments later) |
-| **History trimming** (`agent_loop.trim_history`) | Keeps only the last 8 user turns' worth of context, cut only at safe boundaries | Every tool call within a turn also accumulates in what's resent to Claude each turn -- token cost/latency grows with conversation length faster than it looks |
-| **Structured logging** (stdout, captured by Streamlit Cloud's log viewer) | Every question, guardrail verdict, tool call, cache hit/miss, generated SQL with latency/outcome, and exception traceback | "Production quality" requires being able to debug an issue from logs, not just by reproducing it live |
+| Safeguard | What it does now |
+|---|---|
+| **Per-session rate limit** (`app.py`) | 30 questions/session, 3s minimum between messages |
+| **Snowflake Resource Monitor** (`CENSUS_CHAT_AGENT_BUDGET`) | 10 credit/month quota, auto-suspends the warehouse at 100% usage, enforced by Snowflake itself (not app code) |
+| **Input length cap** (`app.py`) | Rejects messages over 500 characters before they reach the guardrail/agent |
+| **Caching** (`schema_tools.py`, `snowflake_client.py`) | Repeated schema lookups/SQL are served from an in-memory cache; errors are never cached |
+| **Connection retry** (`snowflake_client.py`) | A SQL-level error fails immediately; a connection-level error forces a fresh connection and retries once |
+| **History trimming** (`agent_loop.trim_history`) | Keeps only the last 8 user turns' worth of context sent to Claude, dropping older turns at safe boundaries |
+| **Structured logging** (stdout, captured by Streamlit Cloud's log viewer) | Every question, guardrail verdict, tool call with cache hit/miss, generated SQL with latency/outcome, and exception traceback |
 
 ## Running locally
 
