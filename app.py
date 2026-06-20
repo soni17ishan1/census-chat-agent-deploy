@@ -11,6 +11,15 @@ from agent.agent_loop import run_agent_turn
 
 st.set_page_config(page_title="US Census Chat Agent", page_icon="📊")
 
+# Cost/abuse protection: bounds how much one browser session can spend on
+# Anthropic + Snowflake calls, independent of the Snowflake-side resource
+# monitor (which caps total account spend but wouldn't stop a single
+# session from burning through it quickly). Neither layer alone is
+# sufficient -- this is the per-session throttle, the resource monitor is
+# the account-wide hard stop.
+MAX_MESSAGES_PER_SESSION = 30
+MIN_SECONDS_BETWEEN_MESSAGES = 3
+
 
 def _get_secret(key: str) -> str | None:
     try:
@@ -48,14 +57,33 @@ if "anthropic_messages" not in st.session_state:
     st.session_state.anthropic_messages = []
 if "display_messages" not in st.session_state:
     st.session_state.display_messages = []
+if "message_count" not in st.session_state:
+    st.session_state.message_count = 0
+if "last_message_time" not in st.session_state:
+    st.session_state.last_message_time = 0.0
 
 for msg in st.session_state.display_messages:
     with st.chat_message(msg["role"]):
         st.markdown(msg["content"])
 
+if st.session_state.message_count >= MAX_MESSAGES_PER_SESSION:
+    st.info(
+        f"This session has reached its limit of {MAX_MESSAGES_PER_SESSION} questions "
+        "(a safeguard against runaway usage costs). Please refresh the page to start "
+        "a new session."
+    )
+    st.stop()
+
 user_input = st.chat_input("Ask a question about US Census data...")
 
 if user_input:
+    now = time.monotonic()
+    if now - st.session_state.last_message_time < MIN_SECONDS_BETWEEN_MESSAGES:
+        st.warning("Please wait a few seconds between questions.")
+        st.stop()
+    st.session_state.last_message_time = now
+    st.session_state.message_count += 1
+
     st.session_state.display_messages.append({"role": "user", "content": user_input})
     with st.chat_message("user"):
         st.markdown(user_input)
