@@ -1,6 +1,7 @@
 import pytest
 
 from agent.snowflake_client import (
+    DATABASE,
     MAX_ROWS,
     SqlSafetyError,
     _enforce_row_limit,
@@ -51,3 +52,31 @@ def test_enforce_row_limit_leaves_existing_limit():
 def test_enforce_row_limit_strips_trailing_semicolon():
     result = _enforce_row_limit("SELECT * FROM foo;")
     assert result == f"SELECT * FROM foo LIMIT {MAX_ROWS}"
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
+        "SELECT * FROM SNOWFLAKE.ACCOUNT_USAGE.LOGIN_HISTORY",
+        "select * from snowflake.account_usage.query_history limit 10",
+        "SELECT * FROM SNOWFLAKE_SAMPLE_DATA.TPCH_SF1.CUSTOMER",
+        'SELECT * FROM "OTHER_DB"."PUBLIC"."SOME_TABLE"',
+        "SELECT * FROM OTHER_DB.PUBLIC.SOME_TABLE",
+    ],
+)
+def test_validate_select_only_rejects_other_databases(sql):
+    # Real finding during dev: this role can read account-level metadata
+    # (login history, client IPs) that has nothing to do with the census
+    # dataset. A plain SELECT against it isn't caught by the DDL/DML check.
+    with pytest.raises(SqlSafetyError):
+        validate_select_only(sql)
+
+
+def test_validate_select_only_allows_target_database_qualified_query():
+    sql = f'SELECT * FROM {DATABASE}.PUBLIC."2020_CBG_B01"'
+    validate_select_only(sql)  # should not raise
+
+
+def test_validate_select_only_allows_unqualified_table_names():
+    validate_select_only("SELECT * FROM PUBLIC.SOME_TABLE")  # 2-part, not flagged
+    validate_select_only("SELECT * FROM SOME_TABLE")  # bare table name

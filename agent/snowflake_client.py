@@ -20,6 +20,19 @@ _FORBIDDEN_KEYWORDS_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Defense in depth: this Snowflake role can read account-level metadata
+# (e.g. SNOWFLAKE.ACCOUNT_USAGE.LOGIN_HISTORY -- verified during dev, it
+# returned real login events including client IPs) that has nothing to do
+# with the census dataset. A SELECT is otherwise indistinguishable from a
+# legitimate query, so we explicitly block any reference to a database
+# other than the target one, in addition to relying on the model's own
+# instructions to stay in scope.
+_IDENT = r'(?:"[^"]+"|[A-Za-z_][A-Za-z0-9_$]*)'
+_QUALIFIED_REF_RE = re.compile(rf"({_IDENT})\s*\.\s*{_IDENT}\s*\.\s*{_IDENT}")
+_KNOWN_OTHER_DATABASES_RE = re.compile(
+    r"\b(SNOWFLAKE|SNOWFLAKE_SAMPLE_DATA)\b\s*\.", re.IGNORECASE
+)
+
 MAX_ROWS = 200
 QUERY_TIMEOUT_SECONDS = 25  # leaves headroom under the 60s end-to-end budget
 
@@ -32,6 +45,10 @@ class QueryTimeoutError(RuntimeError):
     """Raised when a query exceeds QUERY_TIMEOUT_SECONDS."""
 
 
+def _strip_ident(token: str) -> str:
+    return token.strip('"').upper()
+
+
 def validate_select_only(sql: str) -> None:
     stripped = sql.strip().rstrip(";")
     if ";" in stripped:
@@ -40,6 +57,11 @@ def validate_select_only(sql: str) -> None:
         raise SqlSafetyError("Only SELECT/WITH statements are allowed.")
     if _FORBIDDEN_KEYWORDS_RE.search(stripped):
         raise SqlSafetyError("Statement contains a forbidden keyword.")
+    if _KNOWN_OTHER_DATABASES_RE.search(stripped):
+        raise SqlSafetyError("Query references a database outside the census dataset.")
+    for match in _QUALIFIED_REF_RE.finditer(stripped):
+        if _strip_ident(match.group(1)) != DATABASE:
+            raise SqlSafetyError("Query references a database outside the census dataset.")
 
 
 def _enforce_row_limit(sql: str) -> str:
