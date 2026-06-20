@@ -50,6 +50,19 @@ Agent loop (agent/agent_loop.py)
 
 **Why the model is never allowed to state a number it didn't get from `run_sql`:** the system prompt explicitly forbids it, and the architecture reinforces it structurally — the model only gets to write a final answer once it has seen real tool results in its context. No separate "fact-checking" pass is needed because the only path to the final answer runs through Snowflake.
 
+### Request lifecycle: what actually happens for one submitted question
+
+The diagram above shows the static structure; this is the order of operations for a single question, end to end (see `app.py` and `agent/agent_loop.py:run_agent_turn`).
+
+1. **Gatekeeping, before any LLM or Snowflake call:** reject if the session has already asked 30 questions, if the message is over 500 characters, or if it's been under 3 seconds since the last question.
+2. **Guardrail (one cheap Claude Haiku call):** classifies the question (using recent conversation for context) as `on_topic`, `off_topic`, or `inappropriate`. If not `on_topic`, a canned refusal is returned immediately — no Snowflake, no main agent call, nothing else runs. This is the fast-fail path.
+3. **Main agent loop (Claude Sonnet, up to 8 rounds / 45s soft deadline):** each round, the model either (a) returns a final text answer directly — this happens when the answer is already visible earlier in the same conversation, costing zero tool calls — or (b) calls one of the three tools (`search_census_tables`, `get_table_fields`, `run_sql`).
+4. **Each tool call checks an in-memory cache first.** A cache hit returns instantly with no Snowflake round-trip. A cache miss actually queries Snowflake, then stores the result for next time (errors are never cached — see Operational safeguards).
+5. **The loop repeats** with the tool result fed back into the conversation, until the model produces a final answer or the iteration/time budget runs out (in which case a fallback message asks the user to narrow the question).
+6. **The answer is rendered and appended to the session's chat history.**
+
+Every step above logs explicitly (see Operational safeguards), so the path a given answer took — guardrail refusal, answered from memory, served from cache, or required a fresh Snowflake query — is visible after the fact, not just inferable.
+
 ## Data notes (load-bearing, not just trivia)
 
 - **Granularity:** Census Block Group (12-digit FIPS code). There is no city/place-level table — the agent is instructed to say so plainly rather than approximate when asked about a city.
