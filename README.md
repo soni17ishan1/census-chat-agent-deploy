@@ -95,16 +95,16 @@ Required environment variables (see `.env.example`):
 pytest tests/ -v
 ```
 
-47 unit tests (mocked Snowflake/Anthropic, no live credentials needed) cover:
+Mocked unit tests (Snowflake/Anthropic mocked, no live credentials needed) cover:
 - SQL safety validation (rejects non-SELECT statements, multi-statement injection, cross-database references, enforces row limits)
 - Guardrail classification (on/off-topic/inappropriate, malformed-output fail-open behavior, markdown-fence stripping, follow-up context handling)
 - Agent loop control flow (tool dispatch, max-iteration fallback, soft-deadline fallback, progress-callback reporting, exception containment, conversation-history trimming without breaking tool_use/tool_result pairing)
 - Caching (`tests/test_caching.py`): repeated lookups are served from cache, but a failed query is never cached -- a transient failure must self-heal on retry, not become permanent
 - Connection resilience (`tests/test_connection_resilience.py`): a SQL-level error fails immediately (no point retrying a wrong query), a connection-level error gets exactly one retry against a fresh connection before giving up
 
-Plus 6 **golden-data regression tests** (`tests/test_golden_data.py`) that hit live Snowflake and check the actual aggregation SQL against the official 2020 Decennial Census population for 5 states (10% tolerance, to allow for expected ACS-vs-decennial variance). These exist specifically because the unit tests above can't catch a data-correctness bug like the geography join fan-out described below — one of the golden tests deliberately re-runs the original buggy query and asserts it's wildly wrong, proving the suite would have caught it. Skipped automatically if `SNOWFLAKE_ACCOUNT` isn't set (e.g. in CI without secrets).
+Plus **golden-data regression tests** (`tests/test_golden_data.py`) that hit live Snowflake and check the actual aggregation SQL against the official 2020 Decennial Census population for several states (10% tolerance, to allow for expected ACS-vs-decennial variance). These exist specifically because the mocked tests above can't catch a data-correctness bug like the geography join fan-out described below — one of them deliberately re-runs the original buggy query and asserts it's wildly wrong, proving the suite would have caught it. Skipped automatically (not failed) if `SNOWFLAKE_ACCOUNT` isn't set.
 
-**CI:** `.github/workflows/test.yml` runs the 47 mocked tests on every push (no Snowflake credentials are configured as GitHub secrets, so the 6 golden tests show as skipped in CI, not failed -- they're a deliberate manual/local verification step, not wired into the automated pipeline, to avoid spending the Snowflake cost-cap credits on every push).
+**CI** (`.github/workflows/test.yml`) runs the mocked suite automatically on every push/PR to `main`. The golden-data tests are deliberately **not** wired into CI -- no Snowflake credentials are configured as GitHub secrets, so they show as skipped there, by design, for three reasons: (1) **cost** -- CI runs on every push, and burning real Snowflake compute against the account's spend cap on every single push (rather than real usage) is wasteful; (2) **security surface** -- it would mean another place the Snowflake password lives, for no real benefit; (3) **reliability** -- live-infrastructure tests are exposed to the same transient failures (e.g. warehouse cold-start) documented in `REFLECTION.md`, which would make CI flaky/untrustworthy rather than a fast, dependable signal. So the split is intentional: CI checks control-flow correctness on every push for free; the golden-data tests check actual data correctness, run manually, when it matters (e.g. before a release).
 
 ## Interpretation of open-ended requirements
 
