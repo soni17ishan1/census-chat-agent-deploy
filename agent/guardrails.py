@@ -5,9 +5,12 @@ fails fast (well under the 60s budget) instead of burning tool-use turns on
 the main agent.
 """
 import json
+import logging
 import re
 
 import anthropic
+
+logger = logging.getLogger(__name__)
 
 _CODE_FENCE_RE = re.compile(r"^```(?:json)?\s*|\s*```$", re.MULTILINE)
 
@@ -65,6 +68,9 @@ def classify(user_message: str, history: list[dict]) -> dict:
         # Fail open to on_topic on a malformed classifier response -- the main
         # agent's own SQL-safety checks and schema grounding are the backstop,
         # so we'd rather risk an extra agent turn than wrongly block a real question.
+        # Logged at WARNING (not INFO) because a misbehaving classifier is a
+        # real signal worth noticing, even though we recover gracefully.
+        logger.warning("Guardrail classifier returned unparseable output, failing open: %r", raw)
         return {"verdict": "on_topic", "reason": "classifier returned unparseable output"}
 
 

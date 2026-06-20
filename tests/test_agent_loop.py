@@ -74,7 +74,7 @@ def test_run_agent_turn_respects_soft_deadline(mock_anthropic_cls):
     mock_client = MagicMock()
     mock_anthropic_cls.return_value = mock_client
 
-    with patch("agent.agent_loop.time.monotonic", side_effect=[0, 1000]):
+    with patch("agent.agent_loop.time.monotonic", side_effect=[0, 1000, 1000]):
         messages = [{"role": "user", "content": "anything"}]
         answer = agent_loop.run_agent_turn(messages)
 

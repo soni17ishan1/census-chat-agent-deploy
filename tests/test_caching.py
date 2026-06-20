@@ -14,12 +14,12 @@ from agent.snowflake_client import _query_cache, run_select
 
 @pytest.fixture(autouse=True)
 def _clear_caches():
-    schema_tools.search_census_tables.cache_clear()
-    schema_tools.get_table_fields.cache_clear()
+    schema_tools._table_search_cache.clear()
+    schema_tools._table_fields_cache.clear()
     _query_cache.clear()
     yield
-    schema_tools.search_census_tables.cache_clear()
-    schema_tools.get_table_fields.cache_clear()
+    schema_tools._table_search_cache.clear()
+    schema_tools._table_fields_cache.clear()
     _query_cache.clear()
 
 

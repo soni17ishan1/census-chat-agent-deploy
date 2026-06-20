@@ -4,6 +4,7 @@ turn after tool results are visible to the model, so it can't hallucinate
 numbers that didn't come back from Snowflake.
 """
 import json
+import logging
 import time
 from typing import Callable, Optional
 
@@ -11,6 +12,8 @@ import anthropic
 
 from agent import schema_tools
 from agent.snowflake_client import run_select
+
+logger = logging.getLogger(__name__)
 
 MODEL = "claude-sonnet-4-6"
 MAX_ITERATIONS = 8
@@ -102,6 +105,7 @@ def _progress_message(name: str, tool_input: dict) -> str:
 
 
 def _execute_tool(name: str, tool_input: dict) -> dict:
+    logger.info("Tool call: %s(%s)", name, tool_input)
     try:
         if name == "search_census_tables":
             return {"results": schema_tools.search_census_tables(tool_input["keyword"])}
@@ -109,8 +113,10 @@ def _execute_tool(name: str, tool_input: dict) -> dict:
             return {"results": schema_tools.get_table_fields(tool_input["table_number"])}
         if name == "run_sql":
             return run_select(tool_input["sql"])
+        logger.warning("Unknown tool requested by model: %s", name)
         return {"error": f"Unknown tool: {name}"}
     except Exception as e:  # tool execution must never crash the agent loop
+        logger.exception("Tool %s(%s) raised unexpectedly", name, tool_input)
         return {"error": f"{type(e).__name__}: {e}"}
 
 
@@ -148,10 +154,19 @@ def run_agent_turn(
     (up to 45s) loop.
     """
     client = anthropic.Anthropic()
-    deadline = time.monotonic() + SOFT_DEADLINE_SECONDS
+    turn_start = time.monotonic()
+    deadline = turn_start + SOFT_DEADLINE_SECONDS
+    tool_calls_made = 0
+    tool_errors = 0
 
-    for _ in range(MAX_ITERATIONS):
+    for iteration in range(MAX_ITERATIONS):
         if time.monotonic() > deadline:
+            logger.warning(
+                "Soft deadline exceeded after %.1fs, %d tool call(s) (%d error(s))",
+                time.monotonic() - turn_start,
+                tool_calls_made,
+                tool_errors,
+            )
             messages.append(
                 {
                     "role": "assistant",
@@ -174,6 +189,12 @@ def run_agent_turn(
             text = "".join(
                 block.text for block in response.content if block.type == "text"
             )
+            source = "LLM/conversation memory (0 tool calls)" if tool_calls_made == 0 else (
+                f"{tool_calls_made} tool call(s), {tool_errors} error(s)"
+            )
+            logger.info(
+                "Turn complete in %.1fs via %s", time.monotonic() - turn_start, source
+            )
             return text or "I couldn't generate a response. Please try rephrasing your question."
 
         tool_result_blocks = []
@@ -182,6 +203,9 @@ def run_agent_turn(
                 if on_progress:
                     on_progress(_progress_message(block.name, block.input))
                 result = _execute_tool(block.name, block.input)
+                tool_calls_made += 1
+                if "error" in result:
+                    tool_errors += 1
                 tool_result_blocks.append(
                     {
                         "type": "tool_result",
@@ -191,6 +215,13 @@ def run_agent_turn(
                 )
         messages.append({"role": "user", "content": tool_result_blocks})
 
+    logger.warning(
+        "Max iterations (%d) exhausted after %.1fs, %d tool call(s) (%d error(s))",
+        MAX_ITERATIONS,
+        time.monotonic() - turn_start,
+        tool_calls_made,
+        tool_errors,
+    )
     fallback = (
         "I wasn't able to settle on an answer within a reasonable number of steps. "
         "Could you rephrase or narrow your question (e.g. specify a state, topic, or year)?"

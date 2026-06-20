@@ -4,23 +4,35 @@ Column codes (e.g. B01001e1) are consistent across the 2019 and 2020 ACS
 table variants in this dataset, so we look them up against the 2020
 metadata tables regardless of which year's data table is ultimately queried.
 """
-from functools import lru_cache
+import logging
 
 from agent.snowflake_client import DATABASE, SCHEMA, get_connection
+
+logger = logging.getLogger(__name__)
 
 METADATA_YEAR = "2020"
 
 AVAILABLE_YEARS = ("2019", "2020")
 
-
 # This metadata is static for the lifetime of the process (it's a fixed,
 # already-published dataset), and these lookups repeat constantly across
 # questions/users (e.g. almost every income question searches "income").
-# lru_cache only memoizes successful returns -- if get_connection() or the
-# query raises, nothing is cached and the next call retries fresh.
-@lru_cache(maxsize=128)
+# Plain dict caches (not lru_cache) so we can log explicitly whether a given
+# call was a cache hit or a fresh Snowflake round-trip -- important for
+# debugging "why was this answer instant vs. slow". A raised exception is
+# never cached, so a transient failure always retries fresh next time.
+_table_search_cache: dict[tuple[str, int], list[dict]] = {}
+_table_fields_cache: dict[str, list[dict]] = {}
+
+
 def search_census_tables(keyword: str, limit: int = 20) -> list[dict]:
     """Find ACS table codes whose title/topic/universe mentions `keyword`."""
+    cache_key = (keyword, limit)
+    if cache_key in _table_search_cache:
+        logger.info("Cache hit: search_census_tables(%r)", keyword)
+        return _table_search_cache[cache_key]
+
+    logger.info("Cache miss: search_census_tables(%r), querying Snowflake", keyword)
     conn = get_connection()
     cur = conn.cursor()
     try:
@@ -35,14 +47,20 @@ def search_census_tables(keyword: str, limit: int = 20) -> list[dict]:
             (f"%{keyword}%", f"%{keyword}%", f"%{keyword}%", limit),
         )
         cols = [d[0] for d in cur.description]
-        return [dict(zip(cols, row)) for row in cur.fetchall()]
+        result = [dict(zip(cols, row)) for row in cur.fetchall()]
     finally:
         cur.close()
+    _table_search_cache[cache_key] = result
+    return result
 
 
-@lru_cache(maxsize=128)
 def get_table_fields(table_number: str) -> list[dict]:
     """Return every column code + human-readable description for a table number."""
+    if table_number in _table_fields_cache:
+        logger.info("Cache hit: get_table_fields(%r)", table_number)
+        return _table_fields_cache[table_number]
+
+    logger.info("Cache miss: get_table_fields(%r), querying Snowflake", table_number)
     conn = get_connection()
     cur = conn.cursor()
     try:
@@ -61,9 +79,10 @@ def get_table_fields(table_number: str) -> list[dict]:
         for r in rows:
             parts = [str(r[c]) for c in cols[1:] if r[c] is not None]
             r["description"] = " > ".join(parts)
-        return rows
     finally:
         cur.close()
+    _table_fields_cache[table_number] = rows
+    return rows
 
 
 SCHEMA_PRIMER = f"""
@@ -83,6 +102,13 @@ about confidence/uncertainty.
 
 Geography: each row is keyed by CENSUS_BLOCK_GROUP, a 12-digit FIPS code.
   - State FIPS = LEFT(CENSUS_BLOCK_GROUP, 2)
+  - In "{{year}}_METADATA_CBG_FIPS_CODES", the STATE column holds the
+    2-letter USPS abbreviation (e.g. 'CO', 'CA'), NOT the full state name
+    ('Colorado' will match zero rows and silently return NULL from a SUM
+    with no error -- this is a real mistake we caught via logging during
+    testing, costing several wasted exploration steps before
+    self-correcting). If you only have a full state name, either map it to
+    its abbreviation yourself or filter by STATE_FIPS instead.
   - County FIPS, in "{{year}}_METADATA_CBG_FIPS_CODES", is only the 3-digit
     county part, NOT the full 5-digit code: it equals
     SUBSTR(CENSUS_BLOCK_GROUP, 3, 3) -- NOT LEFT(CENSUS_BLOCK_GROUP, 5).
