@@ -7,7 +7,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from agent import guardrails
-from agent.agent_loop import run_agent_turn
+from agent.agent_loop import run_agent_turn, trim_history
 
 st.set_page_config(page_title="US Census Chat Agent", page_icon="📊")
 
@@ -106,6 +106,16 @@ if user_input:
                 st.session_state.anthropic_messages.append(
                     {"role": "user", "content": user_input}
                 )
+                st.session_state.anthropic_messages, did_trim = trim_history(
+                    st.session_state.anthropic_messages
+                )
+                if did_trim and not st.session_state.get("warned_about_trim"):
+                    st.session_state.warned_about_trim = True
+                    st.caption(
+                        "ℹ️ This conversation has gotten long, so I've dropped the "
+                        "earliest part of it to keep things fast -- ask again if you "
+                        "need something from much earlier in the chat."
+                    )
                 answer = run_agent_turn(
                     st.session_state.anthropic_messages,
                     on_progress=lambda msg: placeholder.markdown(f"_{msg}_"),

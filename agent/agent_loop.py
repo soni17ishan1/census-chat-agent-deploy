@@ -16,6 +16,12 @@ MODEL = "claude-sonnet-4-6"
 MAX_ITERATIONS = 8
 SOFT_DEADLINE_SECONDS = 45  # leaves headroom under the 60s end-to-end budget
 
+# Every tool call within a turn (search/lookup/SQL results) also gets added
+# to the message history that's resent to Claude on every subsequent turn --
+# so token usage (cost + latency) grows with conversation length much faster
+# than the number of user questions alone suggests. This bounds it.
+MAX_TURNS_IN_CONTEXT = 8
+
 TOOLS = [
     {
         "name": "search_census_tables",
@@ -106,6 +112,28 @@ def _execute_tool(name: str, tool_input: dict) -> dict:
         return {"error": f"Unknown tool: {name}"}
     except Exception as e:  # tool execution must never crash the agent loop
         return {"error": f"{type(e).__name__}: {e}"}
+
+
+def trim_history(messages: list[dict], max_turns: int = MAX_TURNS_IN_CONTEXT) -> tuple[list[dict], bool]:
+    """Keep only the most recent `max_turns` user *questions*, along with
+    each one's full tool-use trace, dropping older turns wholesale.
+
+    A "turn boundary" is a real user question -- a message with plain
+    string content, as opposed to a list of tool_result blocks. We only
+    ever cut at a boundary: cutting in the middle of a turn would split a
+    tool_use block from its required tool_result, which the Anthropic API
+    rejects as an invalid request.
+
+    Returns (trimmed_messages, did_trim) so callers can tell the user when
+    older context was actually dropped.
+    """
+    boundaries = [
+        i for i, m in enumerate(messages) if m["role"] == "user" and isinstance(m["content"], str)
+    ]
+    if len(boundaries) <= max_turns:
+        return messages, False
+    cutoff = boundaries[-max_turns]
+    return messages[cutoff:], True
 
 
 def run_agent_turn(

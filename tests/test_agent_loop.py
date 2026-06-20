@@ -106,6 +106,71 @@ def test_execute_tool_catches_exceptions_instead_of_crashing():
     assert "boom" in result["error"]
 
 
+def _user_turn(text):
+    return {"role": "user", "content": text}
+
+
+def _assistant_tool_use_turn(tool_id="t1"):
+    return {"role": "assistant", "content": [_tool_use_block("run_sql", {"sql": "SELECT 1"}, tool_id)]}
+
+
+def _tool_result_turn(tool_id="t1"):
+    return {"role": "user", "content": [{"type": "tool_result", "tool_use_id": tool_id, "content": "{}"}]}
+
+
+def _full_turn(question, tool_id):
+    """A realistic turn: user question, assistant tool call, tool result, final answer."""
+    return [
+        _user_turn(question),
+        _assistant_tool_use_turn(tool_id),
+        _tool_result_turn(tool_id),
+        {"role": "assistant", "content": [_text_block("answer")]},
+    ]
+
+
+def test_trim_history_noop_when_under_limit():
+    messages = _full_turn("q1", "t1") + _full_turn("q2", "t2")
+    trimmed, did_trim = agent_loop.trim_history(messages, max_turns=8)
+    assert trimmed == messages
+    assert did_trim is False
+
+
+def test_trim_history_drops_oldest_turns_when_over_limit():
+    turns = [_full_turn(f"q{i}", f"t{i}") for i in range(10)]
+    messages = [msg for turn in turns for msg in turn]
+
+    trimmed, did_trim = agent_loop.trim_history(messages, max_turns=3)
+
+    assert did_trim is True
+    # only the last 3 user questions should remain
+    user_questions = [m["content"] for m in trimmed if m["role"] == "user" and isinstance(m["content"], str)]
+    assert user_questions == ["q7", "q8", "q9"]
+
+
+def test_trim_history_never_splits_a_tool_use_pair():
+    turns = [_full_turn(f"q{i}", f"t{i}") for i in range(5)]
+    messages = [msg for turn in turns for msg in turn]
+
+    trimmed, _ = agent_loop.trim_history(messages, max_turns=2)
+
+    # every tool_use block must have its matching tool_result still present
+    tool_use_ids = {
+        block.id
+        for m in trimmed
+        if m["role"] == "assistant"
+        for block in (m["content"] if isinstance(m["content"], list) else [])
+        if getattr(block, "type", None) == "tool_use"
+    }
+    tool_result_ids = {
+        block["tool_use_id"]
+        for m in trimmed
+        if m["role"] == "user" and isinstance(m["content"], list)
+        for block in m["content"]
+        if block.get("type") == "tool_result"
+    }
+    assert tool_use_ids == tool_result_ids
+
+
 def test_execute_tool_unknown_tool_name():
     result = agent_loop._execute_tool("not_a_real_tool", {})
     assert "error" in result
