@@ -28,7 +28,11 @@ _table_fields_cache: BoundedCache[str, list] = BoundedCache()
 
 
 def search_census_tables(keyword: str, limit: int = 20) -> list[dict]:
-    """Find ACS table codes whose title/topic/universe mentions `keyword`."""
+    """Find ACS table codes whose title/topic/universe mentions `keyword`.
+
+    Cache key example: ("income", 20). Cache value example:
+        [{"TABLE_NUMBER": "B19013", "TABLE_TITLE": "Median Household Income...", ...}, ...]
+    """
     cache_key = (keyword, limit)
     cached = _table_search_cache.get(cache_key)
     if cached is not None:
@@ -58,7 +62,11 @@ def search_census_tables(keyword: str, limit: int = 20) -> list[dict]:
 
 
 def get_table_fields(table_number: str) -> list[dict]:
-    """Return every column code + human-readable description for a table number."""
+    """Return every column code + human-readable description for a table number.
+
+    Cache key example: "B19013". Cache value example:
+        [{"TABLE_ID": "B19013e1", "description": "Estimate > Median household income..."}, ...]
+    """
     cached = _table_fields_cache.get(table_number)
     if cached is not None:
         logger.info("Cache hit: get_table_fields(%r)", table_number)

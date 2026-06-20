@@ -12,6 +12,14 @@ import anthropic
 
 logger = logging.getLogger(__name__)
 
+# The classifier model sometimes wraps its JSON answer in a markdown code
+# fence even though told not to, e.g. it returns:
+#   ```json
+#   {"verdict": "off_topic", "reason": "..."}
+#   ```
+# instead of just the JSON object. This regex strips a leading ```json (or
+# plain ```) and a trailing ``` so json.loads() below can parse it. This is
+# a real bug we hit live during testing, not a hypothetical.
 _CODE_FENCE_RE = re.compile(r"^```(?:json)?\s*|\s*```$", re.MULTILINE)
 
 CLASSIFIER_MODEL = "claude-haiku-4-5-20251001"
@@ -46,6 +54,9 @@ def classify(user_message: str, history: list[dict]) -> dict:
         role = turn.get("role", "user")
         content = turn.get("content", "")
         if isinstance(content, list):
+            # Past assistant turns can be a list of structured blocks (text +
+            # past tool_use/tool_result blocks) rather than a plain string --
+            # flatten just the human-readable text parts for this transcript.
             content = " ".join(
                 block.get("text", "") for block in content if isinstance(block, dict)
             )

@@ -33,6 +33,12 @@ _FORBIDDEN_KEYWORDS_RE = re.compile(
 # legitimate query, so we explicitly block any reference to a database
 # other than the target one, in addition to relying on the model's own
 # instructions to stay in scope.
+#
+# A fully-qualified Snowflake table name has 3 dot-separated parts:
+# DATABASE.SCHEMA.TABLE, e.g. SNOWFLAKE.ACCOUNT_USAGE.LOGIN_HISTORY or
+# US_OPEN_CENSUS_DATA....PUBLIC."2020_CBG_B01". _QUALIFIED_REF_RE finds any
+# such 3-part reference in the query text; validate_select_only() below then
+# checks that the first part is always our own DATABASE, never anything else.
 _IDENT = r'(?:"[^"]+"|[A-Za-z_][A-Za-z0-9_$]*)'
 _QUALIFIED_REF_RE = re.compile(rf"({_IDENT})\s*\.\s*{_IDENT}\s*\.\s*{_IDENT}")
 _KNOWN_OTHER_DATABASES_RE = re.compile(
@@ -56,6 +62,12 @@ def _strip_ident(token: str) -> str:
 
 
 def validate_select_only(sql: str) -> None:
+    """Raises SqlSafetyError on the first violation found. Examples:
+        validate_select_only("SELECT * FROM foo")            -> OK
+        validate_select_only("DROP TABLE foo")                -> raises (not SELECT/WITH)
+        validate_select_only("SELECT 1; DROP TABLE foo")      -> raises (two statements)
+        validate_select_only('SELECT * FROM SNOWFLAKE.X.Y')   -> raises (wrong database)
+    """
     stripped = sql.strip().rstrip(";")
     if ";" in stripped:
         raise SqlSafetyError("Only a single SQL statement is allowed.")
@@ -147,6 +159,11 @@ def run_select(sql: str) -> dict:
 
     safe_sql = _enforce_row_limit(sql)
 
+    # Cache key is the exact final SQL string, e.g.:
+    #   'SELECT SUM(b."B01003e1") AS total_population FROM ... WHERE f.STATE = \'CA\' LIMIT 200'
+    # Cache value is the result dict, e.g. {"columns": [...], "rows": [(39346023.0,)], "row_count": 1}.
+    # Same question asked again (by anyone, this cache is shared across all
+    # users) -> instant return below, no Snowflake round-trip.
     cached = _query_cache.get(safe_sql)
     if cached is not None:
         logger.info("Cache hit | sql=%s", safe_sql[:200])

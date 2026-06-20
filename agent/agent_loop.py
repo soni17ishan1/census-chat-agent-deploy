@@ -132,6 +132,13 @@ def trim_history(messages: list[dict], max_turns: int = MAX_TURNS_IN_CONTEXT) ->
 
     Returns (trimmed_messages, did_trim) so callers can tell the user when
     older context was actually dropped.
+
+    Example with max_turns=2: a 3-question conversation
+        [Q1, tool_use, tool_result, A1,  Q2, tool_use, tool_result, A2,  Q3, A3]
+    keeps only the last 2 questions onward, cutting exactly at Q2:
+        [Q2, tool_use, tool_result, A2,  Q3, A3]
+    Q1 and its whole tool-use trace are dropped together as one unit --
+    never, say, just "tool_result" without the "tool_use" that produced it.
     """
     boundaries = [
         i for i, m in enumerate(messages) if m["role"] == "user" and isinstance(m["content"], str)
@@ -185,6 +192,10 @@ def run_agent_turn(
         )
         messages.append({"role": "assistant", "content": response.content})
 
+        # Claude sets stop_reason="tool_use" when it wants to call a tool
+        # before answering, and something else (e.g. "end_turn") when it's
+        # ready to give a final answer. This is the fork in the road: either
+        # we're done (below), or we go run the tool(s) it asked for (further down).
         if response.stop_reason != "tool_use":
             text = "".join(
                 block.text for block in response.content if block.type == "text"
@@ -213,6 +224,10 @@ def run_agent_turn(
                         "content": json.dumps(result, default=str),
                     }
                 )
+        # Anthropic API convention: tool results are sent back as role="user"
+        # (not "tool" -- there's no separate role for it), and if the model
+        # called more than one tool in this response, ALL of their results
+        # must go back together in this one message, not one at a time.
         messages.append({"role": "user", "content": tool_result_blocks})
 
     logger.warning(
