@@ -48,6 +48,14 @@ _KNOWN_OTHER_DATABASES_RE = re.compile(
 MAX_ROWS = 200
 QUERY_TIMEOUT_SECONDS = 25  # leaves headroom under the 60s end-to-end budget
 
+# Snowflake surfaces master/session-token expiration as a ProgrammingError --
+# the same exception class raised for a bad-SQL error -- so errno is the
+# only way to tell "the connection is dead, re-authenticate" apart from
+# "the query is wrong, don't bother retrying". GS codes per
+# snowflake.connector.network: 390110 id token expired, 390112 session
+# expired, 390113/390114/390115 master token not found/expired/invalid.
+_AUTH_TOKEN_EXPIRED_ERRNOS = {390110, 390112, 390113, 390114, 390115}
+
 
 class SqlSafetyError(ValueError):
     """Raised when generated SQL fails the read-only safety check."""
@@ -156,6 +164,35 @@ def _execute_query(sql: str) -> dict:
         cur.close()
 
 
+def _retry_after_reconnect(safe_sql: str, start: float) -> dict:
+    """Discards the (dead) connection and retries `safe_sql` exactly once
+    against a fresh one. Returns the query result dict, or {"error": ...}
+    if the retry also fails."""
+    _force_reconnect()
+    try:
+        return _execute_query(safe_sql)
+    except snowflake.connector.errors.ProgrammingError as e2:
+        elapsed = time.monotonic() - start
+        logger.error(
+            "SQL error on retry after %.1fs: %s | sql=%s", elapsed, e2, safe_sql[:200]
+        )
+        return {"error": f"Snowflake query error: {e2.msg if hasattr(e2, 'msg') else e2}"}
+    except Exception as e2:
+        elapsed = time.monotonic() - start
+        logger.error(
+            "Retry also failed after %.1fs: %s: %s | sql=%s",
+            elapsed,
+            type(e2).__name__,
+            e2,
+            safe_sql[:200],
+        )
+        return {
+            "error": (
+                f"Snowflake connection error after retry: {type(e2).__name__}: {e2}"
+            )
+        }
+
+
 def run_select(sql: str) -> dict:
     """Validate and execute a read-only query. Returns dict with columns/rows or error."""
     try:
@@ -180,14 +217,24 @@ def run_select(sql: str) -> dict:
     try:
         result = _execute_query(safe_sql)
     except snowflake.connector.errors.ProgrammingError as e:
-        # A SQL-level problem (bad column, bad syntax) -- retrying the exact
-        # same query against a fresh connection would just fail the same
-        # way, so don't waste time/budget on it.
-        elapsed = time.monotonic() - start
-        logger.error(
-            "SQL error after %.1fs: %s | sql=%s", elapsed, e, safe_sql[:200]
+        if e.errno not in _AUTH_TOKEN_EXPIRED_ERRNOS:
+            # A genuine SQL-level problem (bad column, bad syntax) --
+            # retrying the exact same query against a fresh connection
+            # would just fail the same way, so don't waste time/budget on it.
+            elapsed = time.monotonic() - start
+            logger.error(
+                "SQL error after %.1fs: %s | sql=%s", elapsed, e, safe_sql[:200]
+            )
+            return {"error": f"Snowflake query error: {e.msg if hasattr(e, 'msg') else e}"}
+        logger.warning(
+            "Auth token expired (errno %s), forcing reconnect and retrying once | sql=%s",
+            e.errno,
+            safe_sql[:200],
         )
-        return {"error": f"Snowflake query error: {e.msg if hasattr(e, 'msg') else e}"}
+        retried = _retry_after_reconnect(safe_sql, start)
+        if "error" in retried:
+            return retried
+        result = retried
     except Exception as e:
         # Anything else (connection drop, warehouse-cold-start timeout,
         # network blip) looks like a connection/session problem rather than
@@ -199,29 +246,10 @@ def run_select(sql: str) -> dict:
             type(e).__name__,
             safe_sql[:200],
         )
-        _force_reconnect()
-        try:
-            result = _execute_query(safe_sql)
-        except snowflake.connector.errors.ProgrammingError as e2:
-            elapsed = time.monotonic() - start
-            logger.error(
-                "SQL error on retry after %.1fs: %s | sql=%s", elapsed, e2, safe_sql[:200]
-            )
-            return {"error": f"Snowflake query error: {e2.msg if hasattr(e2, 'msg') else e2}"}
-        except Exception as e2:
-            elapsed = time.monotonic() - start
-            logger.error(
-                "Retry also failed after %.1fs: %s: %s | sql=%s",
-                elapsed,
-                type(e2).__name__,
-                e2,
-                safe_sql[:200],
-            )
-            return {
-                "error": (
-                    f"Snowflake connection error after retry: {type(e2).__name__}: {e2}"
-                )
-            }
+        retried = _retry_after_reconnect(safe_sql, start)
+        if "error" in retried:
+            return retried
+        result = retried
 
     elapsed = time.monotonic() - start
     logger.info(

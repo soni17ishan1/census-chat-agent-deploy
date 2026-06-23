@@ -58,6 +58,29 @@ def test_connection_error_retries_once_against_fresh_connection(mock_get_conn, m
 
 @patch("agent.snowflake_client._force_reconnect")
 @patch("agent.snowflake_client.get_connection")
+def test_auth_token_expired_retries_once_against_fresh_connection(mock_get_conn, mock_reconnect):
+    # Snowflake surfaces master-token/session-token expiration as a
+    # ProgrammingError (errno 390114 etc.), the same exception class as a
+    # bad-SQL error -- but unlike bad SQL, retrying against a fresh
+    # connection (which re-authenticates) actually fixes it.
+    bad_conn, bad_cur = _mock_conn()
+    bad_cur.execute.side_effect = snowflake.connector.errors.ProgrammingError(
+        msg="Authentication token has expired. The user must authenticate again.",
+        errno=390114,
+    )
+    good_conn, good_cur = _mock_conn(rows=[(42,)])
+    mock_get_conn.side_effect = [bad_conn, good_conn]
+
+    result = run_select("SELECT 42 AS X")
+
+    assert "error" not in result
+    assert result["rows"] == [(42,)]
+    mock_reconnect.assert_called_once()
+    assert mock_get_conn.call_count == 2
+
+
+@patch("agent.snowflake_client._force_reconnect")
+@patch("agent.snowflake_client.get_connection")
 def test_connection_error_gives_up_after_one_failed_retry(mock_get_conn, mock_reconnect):
     conn, cur = _mock_conn()
     cur.execute.side_effect = ConnectionError("connection reset")
