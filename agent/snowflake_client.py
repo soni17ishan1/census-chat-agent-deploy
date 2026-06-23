@@ -115,6 +115,13 @@ def get_connection():
                 database=DATABASE,
                 schema=SCHEMA,
                 login_timeout=15,
+                # This connection is held open and reused for the life of
+                # the process (see module-level _connection), so without a
+                # heartbeat the master token hits its ~4h validity window
+                # and expires from pure age, not actual inactivity. This
+                # makes the connector ping /session/heartbeat in the
+                # background to renew it before that happens.
+                client_session_keep_alive=True,
             )
         return _connection
 
